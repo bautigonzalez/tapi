@@ -1,0 +1,50 @@
+{
+  "name": "consultas-diarias",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Consultas diarias por proveedor sobre SQS FIFO: dispatcher, worker y verificador (desafío técnico tapi)",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "synth": "cdk synth",
+    "audit:runtime": "npm audit --omit=dev --audit-level=high",
+    "audit:all": "npm audit --audit-level=critical",
+    "check": "npm run typecheck && npm test && npm run audit:runtime && npm run audit:all",
+    "local:up": "colima status >/dev/null 2>&1 || colima start; DOCKER_CONFIG=local/.docker DOCKER_HOST=unix://$HOME/.colima/default/docker.sock docker-compose -f local/docker-compose.yml up -d --wait && bash local/generar-cert.sh",
+    "local:down": "DOCKER_CONFIG=local/.docker DOCKER_HOST=unix://$HOME/.colima/default/docker.sock docker-compose -f local/docker-compose.yml down -v",
+    "local:setup": "tsx local/setup.ts",
+    "local:simular": "NODE_EXTRA_CA_CERTS=local/.certs/mock-api.pem tsx local/simular.ts",
+    "local:todo": "npm run local:up && npm run local:setup && npm run local:simular",
+    "test:integration": "vitest run --config vitest.integration.mts"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-dynamodb": "^3.693.0",
+    "@aws-sdk/client-s3": "^3.693.0",
+    "@aws-sdk/client-sqs": "^3.693.0",
+    "@aws-sdk/credential-provider-node": "^3.693.0",
+    "@aws-sdk/lib-dynamodb": "^3.693.0",
+    "@aws-sdk/rds-signer": "^3.693.0",
+    "@smithy/protocol-http": "^5.6.2",
+    "@smithy/signature-v4": "^5.7.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.9.0",
+    "@types/pg": "^8.11.10",
+    "aws-cdk": "^2.167.0",
+    "aws-cdk-lib": "^2.167.0",
+    "cdk-nag": "^2.34.0",
+    "constructs": "^10.4.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.12"
+  }
+}
