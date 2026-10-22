@@ -1,0 +1,34 @@
+# Emuladores locales: Postgres (registros), DynamoDB Local (ledger) y ElasticMQ (SQS FIFO).
+# Los puertos escuchan solo en 127.0.0.1. Las credenciales son de emuladores locales, no secretos.
+name: consultas-local
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: registros
+      POSTGRES_USER: local
+      POSTGRES_PASSWORD: local
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - ./postgres/01_tabla.sql:/docker-entrypoint-initdb.d/01_tabla.sql:ro
+      - ../sql/001_indice_slot.sql:/docker-entrypoint-initdb.d/02_indice_slot.sql:ro
+      - ./postgres/03_datos.sql:/docker-entrypoint-initdb.d/03_datos.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U local -d registros']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.2
+    command: ['-jar', 'DynamoDBLocal.jar', '-inMemory', '-sharedDb']
+    ports:
+      - '127.0.0.1:8000:8000'
+
+  sqs:
+    image: softwaremill/elasticmq-native:1.7.1
+    ports:
+      - '127.0.0.1:9324:9324'
+      - '127.0.0.1:9325:9325'
