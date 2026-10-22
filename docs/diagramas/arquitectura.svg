@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 760" width="1120" height="760" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif" role="img" aria-label="Arquitectura de consultas diarias por proveedor">
+  <title>Arquitectura · Consultas diarias por proveedor</title>
+  <style>
+    .h { font-size: 22px; font-weight: 700; fill: #17202a; }
+    .t { font-size: 13px; font-weight: 650; fill: #17202a; }
+    .s { font-size: 11px; fill: #5b6573; }
+    .b { font-size: 11.5px; fill: #17202a; }
+    .bb { font-size: 12px; font-weight: 650; fill: #17202a; }
+    .ours { fill: #e6f2f1; stroke: #0f766e; stroke-width: 1.5; }
+    .theirs { fill: #f4f6f8; stroke: #8a94a3; stroke-width: 1.3; stroke-dasharray: 5 4; }
+    .amber { fill: #fdf5e1; stroke: #c98a00; stroke-width: 1.4; }
+    .plain { fill: #ffffff; stroke: #17202a; stroke-width: 1.2; }
+    .a { stroke: #17202a; stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+    .ad { stroke: #5b6573; stroke-width: 1.3; fill: none; stroke-dasharray: 5 4; marker-end: url(#ahm); }
+    .lbl { font-size: 11px; font-weight: 600; fill: #0f766e; }
+    .badge { fill: #0f766e; }
+    .badge-t { font-size: 11px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+    .vpc { fill: #17202a; }
+    .vpc-t { font-size: 9px; font-weight: 700; fill: #ffffff; text-anchor: middle; letter-spacing: 0.04em; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#17202a"/></marker>
+    <marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6573"/></marker>
+  </defs>
+
+  <rect x="0" y="0" width="1120" height="760" fill="#ffffff"/>
+  <text x="24" y="38" class="h">Arquitectura · Consultas diarias por proveedor</text>
+  <text x="24" y="60" class="s" style="font-size:12.5px">Cómo cada fila de la tabla se convierte, a su hora, en una consulta al proveedor: de a una por proveedor y repartidas en el día.</text>
+
+  <!-- Límites -->
+  <rect x="16" y="76" width="890" height="668" rx="14" fill="none" stroke="#17202a" stroke-width="1.2"/>
+  <text x="32" y="100" class="t">Cuenta AWS · una región</text>
+  <text x="200" y="100" class="s">Las piezas marcadas VPC corren en una red privada sin salida a internet</text>
+  <rect x="920" y="76" width="184" height="668" rx="14" fill="#fafbfc" stroke="#8a94a3" stroke-dasharray="5 4"/>
+  <text x="936" y="100" class="t">Fuera de AWS</text>
+
+  <!-- Columna 1: planificar -->
+  <rect x="40" y="120" width="230" height="64" rx="10" class="ours"/>
+  <text x="56" y="146" class="t">EventBridge Scheduler</text>
+  <text x="56" y="166" class="s">el reloj: suena cada 1 minuto</text>
+
+  <rect x="40" y="240" width="230" height="80" rx="10" class="ours"/>
+  <rect x="226" y="248" width="34" height="16" rx="8" class="vpc"/><text x="243" y="259.5" class="vpc-t">VPC</text>
+  <text x="56" y="266" class="t">Dispatcher · Lambda</text>
+  <text x="56" y="286" class="s">busca en el índice lo que toca,</text>
+  <text x="56" y="302" class="s">lo encola y mueve el señalador</text>
+
+  <rect x="40" y="380" width="230" height="90" rx="10" class="theirs"/>
+  <rect x="226" y="388" width="34" height="16" rx="8" class="vpc"/><text x="243" y="399.5" class="vpc-t">VPC</text>
+  <text x="56" y="406" class="t">Aurora PostgreSQL</text>
+  <text x="56" y="425" class="s">tabla registros (de tapi)</text>
+  <text x="56" y="443" class="s">índice: proveedor, minuto, id</text>
+  <text x="56" y="460" class="s">la leemos, nunca la escribimos</text>
+
+  <rect x="40" y="540" width="230" height="72" rx="10" class="ours"/>
+  <rect x="226" y="548" width="34" height="16" rx="8" class="vpc"/><text x="243" y="559.5" class="vpc-t">VPC</text>
+  <text x="56" y="566" class="t">Verificador · Lambda</text>
+  <text x="56" y="586" class="s">cada noche: capacidad,</text>
+  <text x="56" y="602" class="s">solapamientos, proveedores nuevos</text>
+
+  <rect x="40" y="660" width="230" height="64" rx="10" class="ours"/>
+  <text x="56" y="686" class="t">CloudWatch + SNS</text>
+  <text x="56" y="706" class="s">métricas y 19 alarmas → email</text>
+
+  <!-- Columna 2: la cola y los datos -->
+  <rect x="320" y="120" width="290" height="300" rx="10" class="ours"/>
+  <text x="336" y="146" class="t">SQS FIFO · la cola</text>
+  <text x="336" y="165" class="s">una fila por proveedor (MessageGroupId)</text>
+
+  <text x="336" y="205" class="bb">edenor</text>
+  <rect x="408" y="190" width="30" height="22" rx="4" class="plain"/>
+  <rect x="444" y="190" width="30" height="22" rx="4" class="plain"/>
+  <rect x="480" y="190" width="30" height="22" rx="4" class="plain"/>
+  <rect x="518" y="187" width="80" height="28" rx="6" fill="#0f766e"/><text x="558" y="205" class="badge-t">en curso</text>
+
+  <text x="336" y="265" class="bb">aysa</text>
+  <rect x="444" y="250" width="30" height="22" rx="4" class="plain"/>
+  <rect x="480" y="250" width="30" height="22" rx="4" class="plain"/>
+  <rect x="518" y="247" width="80" height="28" rx="6" fill="#0f766e"/><text x="558" y="265" class="badge-t">en curso</text>
+
+  <text x="336" y="325" class="bb">telecom</text>
+  <rect x="480" y="310" width="30" height="22" rx="4" class="plain"/>
+  <rect x="518" y="307" width="80" height="28" rx="6" class="amber"/><text x="558" y="325" style="font-size:11px;font-weight:700;fill:#8a5a00;text-anchor:middle">esperando</text>
+
+  <text x="336" y="370" class="s">El siguiente de una fila sale recién</text>
+  <text x="336" y="386" class="s">cuando termina el que está en curso.</text>
+  <text x="336" y="402" class="s">Las filas de los otros proveedores siguen.</text>
+
+  <rect x="320" y="440" width="140" height="52" rx="10" class="ours"/>
+  <text x="334" y="462" class="t">DLQ</text>
+  <text x="334" y="480" class="s">red de seguridad</text>
+  <rect x="470" y="440" width="140" height="52" rx="10" class="ours"/>
+  <text x="484" y="462" class="t">Agotados</text>
+  <text x="484" y="480" class="s">para revisar a mano</text>
+
+  <rect x="320" y="540" width="290" height="104" rx="10" class="ours"/>
+  <text x="336" y="566" class="t">DynamoDB · executions</text>
+  <text x="336" y="588" class="b">• el señalador de cada proveedor</text>
+  <text x="336" y="606" class="b">• el estado de cada consulta</text>
+  <text x="336" y="624" class="b">• resultados y estadísticas</text>
+
+  <rect x="320" y="664" width="290" height="60" rx="10" class="ours"/>
+  <text x="336" y="690" class="t">S3</text>
+  <text x="336" y="710" class="s">respuestas de más de 8 KB (las escribe el Worker)</text>
+
+  <!-- Columna 3: consultar -->
+  <rect x="660" y="240" width="220" height="80" rx="10" class="ours"/>
+  <rect x="836" y="248" width="34" height="16" rx="8" class="vpc"/><text x="853" y="259.5" class="vpc-t">VPC</text>
+  <text x="676" y="266" class="t">Worker · Lambda</text>
+  <text x="676" y="286" class="s">toma 1 mensaje, lo reclama,</text>
+  <text x="676" y="302" class="s">llama a la API y guarda</text>
+
+  <rect x="660" y="380" width="220" height="190" rx="10" class="theirs"/>
+  <text x="676" y="404" class="t">API interna (de tapi)</text>
+  <rect x="680" y="418" width="180" height="36" rx="6" class="plain"/><text x="694" y="441" class="b">API Gateway (privada, IAM)</text>
+  <rect x="680" y="470" width="180" height="36" rx="6" class="plain"/><text x="694" y="493" class="b">λ1</text>
+  <rect x="680" y="522" width="180" height="36" rx="6" class="plain"/><text x="694" y="545" class="b">λ2 · llama al proveedor</text>
+  <path d="M770,454 V466" class="a"/>
+  <path d="M770,506 V518" class="a"/>
+
+  <rect x="660" y="590" width="220" height="60" rx="10" class="amber"/>
+  <text x="676" y="616" class="t">Leases en λ2</text>
+  <text x="676" y="636" class="s">una llave por proveedor</text>
+
+  <rect x="660" y="670" width="220" height="54" rx="10" class="plain"/>
+  <text x="676" y="694" class="t">KMS</text>
+  <text x="676" y="712" class="s">todo cifrado con llave propia</text>
+
+  <!-- Columna 4: proveedores -->
+  <text x="936" y="404" class="t">Proveedores</text>
+  <rect x="940" y="416" width="148" height="40" rx="8" class="theirs"/><text x="956" y="441" class="b">Edenor</text>
+  <rect x="940" y="470" width="148" height="40" rx="8" class="theirs"/><text x="956" y="495" class="b">AySA</text>
+  <rect x="940" y="524" width="148" height="40" rx="8" class="theirs"/><text x="956" y="549" class="b">Telecom</text>
+  <text x="956" y="590" class="s">… y los demás</text>
+
+  <!-- Leyenda -->
+  <rect x="936" y="640" width="16" height="12" class="ours"/><text x="958" y="650" class="s">lo construimos</text>
+  <rect x="936" y="662" width="16" height="12" class="theirs"/><text x="958" y="672" class="s">ya existe en tapi</text>
+  <rect x="936" y="684" width="16" height="12" class="amber"/><text x="958" y="694" class="s">lo agrega la API</text>
+  <circle cx="944" cy="714" r="8" class="badge"/><text x="944" y="718" class="badge-t" style="font-size:9px">1</text><text x="958" y="718" class="s">orden del recorrido</text>
+
+  <!-- Flechas principales -->
+  <path d="M155,184 V236" class="a"/>
+  <circle cx="171" cy="210" r="10" class="badge"/><text x="171" y="214" class="badge-t">1</text>
+  <text x="187" y="214" class="lbl">despierta</text>
+
+  <path d="M155,320 V376" class="a"/>
+  <circle cx="171" cy="348" r="10" class="badge"/><text x="171" y="352" class="badge-t">2</text>
+  <text x="187" y="352" class="lbl">busca lo que toca</text>
+
+  <path d="M270,268 H316" class="a"/>
+  <circle cx="293" cy="252" r="10" class="badge"/><text x="293" y="256" class="badge-t">3</text>
+
+  <path d="M610,280 H656" class="a"/>
+  <circle cx="633" cy="264" r="10" class="badge"/><text x="633" y="268" class="badge-t">4</text>
+
+  <path d="M660,305 H648 V560 H614" class="a"/>
+  <circle cx="648" cy="420" r="10" class="badge"/><text x="648" y="424" class="badge-t">7</text>
+
+  <path d="M770,320 V376" class="a"/>
+  <circle cx="786" cy="348" r="10" class="badge"/><text x="786" y="352" class="badge-t">5</text>
+  <text x="802" y="352" class="lbl">llamada firmada</text>
+
+  <path d="M860,540 C895,540 905,492 936,490" class="a"/>
+  <circle cx="900" cy="530" r="10" class="badge"/><text x="900" y="534" class="badge-t">6</text>
+
+  <path d="M770,558 V586" class="a"/>
+  <text x="782" y="584" class="s">toma la llave</text>
+
+  <!-- Caminos secundarios -->
+  <path d="M270,305 H292 V592 H316" class="ad"/>
+  <text transform="translate(286,500) rotate(-90)" class="s">señalador y estado</text>
+  <path d="M660,290 H630 V466 H614" class="ad"/>
+  <path d="M390,420 V436" class="ad"/>
+  <path d="M155,540 V474" class="ad"/>
+  <path d="M270,600 H316" class="ad"/>
+  <path d="M155,612 V656" class="ad"/>
+  <path d="M40,152 H26 V576 H36" class="ad"/>
+  <text transform="translate(22,420) rotate(-90)" class="s">cada noche</text>
+</svg>
