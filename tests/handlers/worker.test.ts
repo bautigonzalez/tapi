@@ -147,6 +147,48 @@ describe('worker: errores', () => {
     expect(queue.holds[0]?.seconds).toBe(60);
   });
 
+  it('desconocido sin lease en el último intento: cierra como agotado pero retiene el grupo hasta el fin de la cuarentena', async () => {
+    let clockRef: FakeClock | undefined;
+    const { worker, repo, queue, api, clock } = setup(
+      () => {
+        clockRef?.advance(TIMEOUTS.httpMs);
+        return { type: 'timeout' };
+      },
+      { leaseInApi: false },
+    );
+    clockRef = clock;
+    const job = makeJob();
+    for (let i = 0; i < 4; i++) {
+      const res = await worker(sqsEvent([job]));
+      expect(res.batchItemFailures).toEqual([{ itemIdentifier: 'm0' }]);
+    }
+    expect(repo.run(job)?.status).toBe('FAILED_EXHAUSTED');
+    expect(queue.exhausted).toHaveLength(1);
+    expect(queue.holds.map((h) => h.seconds)).toEqual([60, 60, 60, 60]);
+    // Pasada la cuarentena, el mensaje vuelve, se ve terminal y se borra sin llamar de nuevo.
+    clock.advance(60_000);
+    const after = await worker(sqsEvent([job]));
+    expect(after.batchItemFailures).toEqual([]);
+    expect(api.calls).toHaveLength(4);
+  });
+
+  it('desconocido sin lease con el breaker del proveedor abierto: la pausa no es menor que la cuarentena', async () => {
+    let clockRef: FakeClock | undefined;
+    const { worker, repo, queue, clock } = setup(
+      () => {
+        clockRef?.advance(TIMEOUTS.httpMs);
+        return { type: 'timeout' };
+      },
+      { leaseInApi: false },
+    );
+    clockRef = clock;
+    repo.providerStats.set('edenor', { ...EMPTY_STATS, calls: 30, fails: 20, failRecords: 12 });
+    const job = makeJob();
+    await worker(sqsEvent([job]));
+    expect(repo.run(job)).toMatchObject({ waitingReason: 'provider', attempt: 0 });
+    expect(queue.holds[0]?.seconds).toBe(60);
+  });
+
   it('desconocido con lease en la API: backoff normal, el lease protege al proveedor', async () => {
     const { worker, queue } = setup(() => ({ type: 'timeout' }), { leaseInApi: true });
     await worker(sqsEvent([makeJob()]));

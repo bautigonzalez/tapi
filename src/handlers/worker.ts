@@ -124,6 +124,11 @@ async function processRecord(deps: WorkerDeps, record: SQSRecord): Promise<Resul
     return 'DONE';
   }
 
+  // Sin lease en λ2, un resultado desconocido puede haber dejado a λ2 viva: ninguna de las salidas
+  // de abajo libera el grupo antes de que venza la cuarentena (§4), tampoco la del último intento.
+  const quarantineLeftS =
+    outcome.reason === 'unknown' && !deps.config.leaseInApi ? Math.max(0, Math.ceil(TIMEOUTS.quarantineS - (now - callStart) / 1_000)) : 0;
+
   // Falla de la API vista en varios registros y proveedores: pausa global, el registro no se quema.
   // Si solo falla este registro (ruta inexistente, por ejemplo), se trata como error del registro.
   if (outcome.reason === 'api' && apiBreakerOpen(global.stats)) {
@@ -137,7 +142,7 @@ async function processRecord(deps: WorkerDeps, record: SQSRecord): Promise<Resul
   // Falla el proveedor (o el breaker detecta que la mayoría de las fallas son suyas): pausa sin gastar intentos.
   if (outcome.reason === 'provider' || providerBreakerOpen(view.stats)) {
     const receiveCount = Number(record.attributes.ApproximateReceiveCount ?? 1);
-    const seconds = providerHold(state.backoffLevel, outcome.retryAfterS, receiveCount, random);
+    const seconds = Math.max(providerHold(state.backoffLevel, outcome.retryAfterS, receiveCount, random), quarantineLeftS);
     await repo.markWaiting(job, token, 'provider', false, now);
     await repo.pauseProvider(job.proveedor, now + seconds * 1_000, { disable: outcome.disableProvider, raiseBackoff: true });
     if (outcome.disableProvider) {
@@ -149,21 +154,22 @@ async function processRecord(deps: WorkerDeps, record: SQSRecord): Promise<Resul
   }
 
   // Falla del registro, resultado desconocido o falla de la API aislada a este registro: consume un intento.
-  if (claim.attempt + 1 >= RETRY.maxAttempts) return exhaust(deps, job, token, outcome, now);
-  const quarantineLeftS =
-    outcome.reason === 'unknown' && !deps.config.leaseInApi ? TIMEOUTS.quarantineS - (now - callStart) / 1_000 : 0;
-  const seconds = Math.max(Math.ceil(quarantineLeftS), recordBackoff(claim.attempt, random));
+  if (claim.attempt + 1 >= RETRY.maxAttempts) {
+    await exhaust(deps, job, token, outcome, now);
+    // La corrida ya quedó cerrada: al volver, el claim la ve terminal y el mensaje se borra.
+    return quarantineLeftS > 0 ? hold(quarantineLeftS) : 'DONE';
+  }
+  const seconds = Math.max(quarantineLeftS, recordBackoff(claim.attempt, random));
   await repo.markWaiting(job, token, outcome.reason, true, now);
   metric('Reintentos', 1, { ...dims, motivo: outcome.reason });
   return hold(seconds);
 }
 
-async function exhaust(deps: WorkerDeps, job: Job, token: string, outcome: Extract<Outcome, { kind: 'retryable' }>, now: number): Promise<Result> {
+async function exhaust(deps: WorkerDeps, job: Job, token: string, outcome: Extract<Outcome, { kind: 'retryable' }>, now: number): Promise<void> {
   await deps.repo.finish(job, token, 'FAILED_EXHAUSTED', { code: outcome.code, httpStatus: outcome.httpStatus }, now);
   await deps.queue.sendExhausted({ code: outcome.code, execId: job.execId, recordId: job.recordId, proveedor: job.proveedor, runDate: job.runDate });
   log.warn('intentos_agotados', { execId: job.execId, proveedor: job.proveedor, codigo: outcome.code });
   metric('Agotados', 1, { proveedor: job.proveedor });
-  return 'DONE';
 }
 
 async function bestEffort(event: string, fn: () => Promise<void>): Promise<void> {
