@@ -1,0 +1,26 @@
+node_modules/
+cdk.out/
+coverage/
+dist/
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# Credenciales, claves y configuración local: nunca al repo
+.env
+.env.*
+!.env.example
+.envrc
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+
+# Valores reales del entorno (VPC, subnets, base): van en cdk.context.json o por -c, no en cdk.json
+cdk.context.json
+
+# Entorno local
+local/.certs/
+local/.docker/
