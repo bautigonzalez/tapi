@@ -1,6 +1,6 @@
 # Consultas diarias por proveedor
 
-Propuesta de arquitectura · Desafío técnico tapi · Octubre 2026
+Propuesta de arquitectura · Desafío técnico tapi · Octubre de 2026
 
 ---
 
@@ -18,7 +18,7 @@ Propuesta de arquitectura · Desafío técnico tapi · Octubre 2026
 - Un reloj reparte los registros en los 1.440 minutos del día.
 - Una cola **SQS FIFO** tiene un grupo de mensajes por proveedor. SQS no entrega el siguiente mensaje de un grupo hasta que se resolvió el anterior, así que **la exclusión entre nuestros workers la impone el servicio**, no nuestro código. Se mantiene ante crashes, deploys y reintentos.
 - **Un lease dentro de λ2** extiende esa exclusión hasta el punto donde se llama al proveedor.
-- El camino de datos usa 5 servicios (EventBridge Scheduler, Dispatcher, SQS FIFO, Worker y DynamoDB), con un verificador diario al costado.
+- El camino de datos es corto: EventBridge Scheduler → Dispatcher → SQS FIFO → Worker → DynamoDB (y S3 para las respuestas grandes), con un verificador diario al costado.
 
 **Los tres problemas difíciles.**
 
@@ -26,18 +26,18 @@ Propuesta de arquitectura · Desafío técnico tapi · Octubre 2026
 |---|---|---|
 | La cadena λ1→λ2 sigue viva cuando el worker corta por timeout | Un reintento inmediato llamaría al proveedor mientras λ2 todavía lo llama | Lease por proveedor en λ2 y una sola capa de reintentos. Si la API no se puede cambiar, cuarentena de 90 s |
 | SQS FIFO solo revisa los primeros 120.000 mensajes para encontrar grupos libres | El backlog de un proveedor lento bloquearía a todos | Admisión por proveedor con una cota global de 60.000 mensajes por cola |
-| Con exclusión, un proveedor atiende como máximo 86.400 s ÷ tiempo de ciclo consultas por día | Un proveedor grande puede no entrar en 24 h | Modelo de capacidad ρ, medido y con alerta preventiva |
+| Con exclusión, un proveedor atiende como máximo 86.400 s ÷ L_p consultas por día (L_p: lo que ocupa cada consulta) | Un proveedor grande puede no entrar en 24 h | Modelo de capacidad ρ, medido cada noche, con alarma si un proveedor no entra en el día |
 
 **Semántica de entrega.**
 
 - La entrega es at-least-once. Con el claim condicional y la `Idempotency-Key` queda **un único resultado registrado por (registro, día)**.
-- Con el lease en λ2, nunca hay dos llamadas nuestras en vuelo hacia un mismo proveedor. Con la cuarentena, que es la alternativa si la API no cambia, la garantía es temporal: depende de que se respeten los timeouts y el init de Lambda (cota de 72 s).
+- Con el lease en λ2, nunca hay dos llamadas nuestras en vuelo hacia un mismo proveedor. Con la cuarentena, que es la alternativa si la API no cambia, la garantía depende de que se respeten los timeouts y el init de Lambda (cota de 72 s).
 - Un duplicado hacia el proveedor solo puede ocurrir ante fallas, y es inocuo si la consulta es de solo lectura, como sugiere el enunciado.
 
 **Números.**
 
 - 1M de registros por día son 11,6 req/s, con ~12 requests en vuelo.
-- Costo: ~USD 580/mes, unos USD 19 por millón de consultas.
+- Costo: ~USD 640/mes, unos USD 21 por millón de consultas.
 - Plazos: MVP en 4 semanas, producción en 7.
 
 **Decisiones clave** (detalle en el [Anexo C](#anexo-c--decisiones-adrs)):
@@ -54,12 +54,13 @@ Propuesta de arquitectura · Desafío técnico tapi · Octubre 2026
 
 | # | Supuesto o interpretación | Si no se cumple |
 |---|---|---|
-| S1 | La base origen es PostgreSQL (Aurora o RDS) con un reader, y la tabla es `registros(id, proveedor, endpoint, body)`, como en el enunciado | Con DynamoDB, un GSI sobre `proveedor` + `slot`. Con otro motor, una columna calculada e indexada |
+| S1 | La base origen es PostgreSQL (Aurora o RDS) con un reader, y la tabla es `registros(id, proveedor, endpoint, body)`, como en el enunciado, con `id` de tipo texto | Con DynamoDB, un GSI sobre `proveedor` + `slot`. Con otro motor, una columna calculada e indexada. Con un `id` numérico o uuid, se castea a texto en la query |
 | S2 | "Evitar concurrencia" significa como máximo 1 request nuestro en vuelo por proveedor | Si alcanza con un rate limit, la admisión lo cubre. Si un proveedor acepta `c > 1`, ver el Anexo A |
 | S3 | "Diaria" significa una ejecución por registro y por día UTC | Un día de negocio local solo desplaza el origen. UTC evita el cambio de horario |
 | S4 | λ2 es la que llama al proveedor externo | Si fuera λ1, el lease va en λ1 |
 | S5 | La consulta es de solo lectura en el proveedor | Si escribe, la `Idempotency-Key` pasa a ser obligatoria del lado de la API |
 | S6 | Un alta se consulta en su próximo turno: el mismo día si su minuto todavía no pasó y, si no, al día siguiente. Las bajas se borran | Si hay un flag de baja, se agrega al índice parcial. Si las altas deben correr al instante: outbox + CDC (Anexo A) |
+| S7 | Un proveedor nuevo arranca deshabilitado hasta que se carga su allowlist de endpoints: el endpoint sale de la tabla y no se llama a nada sin validar (SSRF). El Verificador lo detecta esa noche y dispara una alarma | Si los proveedores nuevos tienen que consultarse sin intervención, la API publica la allowlist de cada proveedor y el Verificador la carga |
 
 ---
 
@@ -67,7 +68,7 @@ Propuesta de arquitectura · Desafío técnico tapi · Octubre 2026
 
 ![Diagrama de arquitectura](diagramas/arquitectura.png)
 
-Fuente editable: [diagramas/arquitectura.svg](diagramas/arquitectura.svg). El diagrama de abajo es el mismo en Mermaid, con el detalle de los permisos y las colas.
+Fuente editable: [diagramas/arquitectura.svg](diagramas/arquitectura.svg). El diagrama de abajo es la versión detallada en Mermaid: suma la red, las colas y la tabla de leases, y numera los componentes (①–⑤) en lugar de los pasos.
 
 ```mermaid
 flowchart LR
@@ -98,7 +99,7 @@ flowchart LR
   DISP -->|ledger, cursor, abiertas y barrido horario| DDB
   DISP -->|SendMessageBatch| FIFO
   FIFO -->|event source mapping| WRK
-  FIFO -.->|redrive tras 1000 recepciones| DLQ
+  FIFO -.->|redrive tras 1.000 recepciones| DLQ
   WRK -->|claim y cierre condicionales| DDB
   WRK -->|respuestas grandes| S3
   WRK -->|4 intentos agotados| EXH
@@ -108,6 +109,7 @@ flowchart LR
   L2 -->|una llamada a la vez| PROV
   VER -->|llamadas registradas| LEASE
   VER --> DDB
+  VER -->|inválidos y proveedores nuevos| RDB
   WRK -.-> CW
   L2 -.-> CW
   VER -.-> CW
@@ -140,8 +142,8 @@ Si se configuran el security group de los endpoints y las prefix lists de los ga
 | Worker (Lambda) | Ejecuta, clasifica y persiste | `MaximumConcurrency` evita que le quite concurrencia de Lambda a la API, que está en la misma cuenta |
 | DynamoDB `executions` | Cursores, configuración, ledger y resultados | Escrituras condicionales y TTL, sin manejar conexiones |
 | S3 | Respuestas de más de 8 KB | Desde ~8 KB, un PUT a S3 cuesta menos que las WRU |
-| λ2 con `provider_leases` (equipo de la API) | Exclusión en el punto donde se llama al proveedor, y registro de cada llamada | Es la única capa que cubre a la λ2 zombie ([§4](#4-exclusión-por-proveedor-de-punta-a-punta)) |
-| Verificador (Lambda diaria) | Calcula ρ por proveedor y el SLI de solapamiento | Alerta antes de que empiece el día y demuestra que la garantía se cumplió |
+| λ2 con `provider_leases` (equipo de la API) | Exclusión en el punto donde se llama al proveedor, y registro de cada llamada | Cubre a la λ2 zombie sin depender de los tiempos; la alternativa es la cuarentena ([§4](#4-exclusión-por-proveedor-de-punta-a-punta)) |
+| Verificador (Lambda diaria) | Calcula ρ por proveedor y el SLI de solapamiento, y detecta proveedores nuevos y registros que no se pueden despachar | Avisa antes de que empiece el día y demuestra que la garantía se cumplió |
 
 ---
 
@@ -159,14 +161,14 @@ CREATE INDEX CONCURRENTLY idx_registros_proveedor_slot ON registros
 Cada proveedor tiene en `executions` un **cursor** `(fecha, slot, id)`. En cada tick:
 
 1. Lee los cursores y los topes de los proveedores habilitados desde DynamoDB.
-2. Hace **una sola query** en el reader, que recibe los cursores como arrays (`unnest($proveedores, $slots, $ids, $lugares)`) y aplica un `LATERAL` por proveedor:
+2. Hace **una sola query** en el reader, que recibe los cursores como arrays (`unnest` de proveedor, fecha, cursor, slot hasta y lugar) y aplica un `LATERAL` por proveedor:
    - `lugar = cap_p − abiertas_p` (las abiertas son las ejecuciones no terminales del GSI `open`);
    - toma registros con `(slot, id)` mayores al cursor, en orden, hasta `lugar`.
 3. **Envía primero y escribe el ledger después.** Usa `SendMessageBatch` con `DedupId = execId`, escribe la ejecución `ENQUEUED` con la condición `attribute_not_exists` y después avanza el cursor con una escritura condicional. Si `SendMessageBatch` falla en parte, el cursor avanza solo hasta el último mensaje enviado en orden, y el resto se reintenta en el tick siguiente.
 
 **Cambio de día.** Es solo un rango de slots.
 
-- **De ayer** quedan los slots mayores al minuto actual. Los menores se saltean porque ya vence su turno de hoy. El Dispatcher escribe una fila `SUPERSEDED` para cada uno, así el SLI de cobertura los cuenta. Solo pasa con proveedores en pausa.
+- **De ayer** quedan los slots mayores al minuto actual. Los menores o iguales se saltean, porque hoy ya les tocó de nuevo. El Dispatcher los cuenta en un contador por proveedor y día (`SKIPPED#fecha`) y emite la métrica `Salteados`. Pasa con proveedores en pausa, con caídas de más de 24 h o con un proveedor que no entra en el día (ρ > 1, [§6](#6-capacidad-y-escala)).
 - **De hoy** se toman los slots hasta el minuto actual.
 
 **Garantías del orden "enviar, ledger, cursor".**
@@ -183,7 +185,7 @@ Cada proveedor tiene en `executions` un **cursor** `(fecha, slot, id)`. En cada 
 - **Tope por proveedor:** `cap_p = clamp(⌈900 s × c_p / L_p⌉, 5, 2.000)`, o sea hasta 15 minutos de trabajo por proveedor en cola.
 - **Cota global:** la suma de los `cap_p` se limita a **60.000 por cola**.
   - Si la supera, todos los topes se escalan en proporción.
-  - Si ni siquiera el mínimo entra (más de 12.000 proveedores), los proveedores se reparten en varias colas FIFO.
+  - Si ni siquiera el mínimo entra (más de 12.000 proveedores), hay que repartir los proveedores en varias colas FIFO. El Dispatcher lo detecta con una alarma y el reparto queda como evolución (Anexo A).
   - Así la cola nunca se acerca a la ventana de 120.000 mensajes.
 
 **Proveedor en pausa.**
@@ -211,7 +213,7 @@ Cada proveedor tiene en `executions` un **cursor** `(fecha, slot, id)`. En cada 
    Si la fila es terminal, es un duplicado y se descarta (ACK). Si está en `IN_PROGRESS` con lease vigente, **no se descarta**: se devuelve como fallido con visibilidad igual al lease restante, por si el titular cayó.
 4. **Allowlist.** Si el endpoint no está en la allowlist del proveedor, la ejecución termina en `FAILED_PERMANENT`.
 5. **④ Llamada.** Se hace con `Idempotency-Key = execId` y `X-Correlation-Id`, **sin reintentos automáticos del SDK**. λ2 toma el lease y llama al ⑤ proveedor.
-6. **Cierre condicional.** La ejecución termina en un estado terminal, o pasa a `WAITING` con un motivo: `record`, `unknown`, `provider` o `api`. Solo los dos primeros suman un intento. El orden es fijo: primero se escribe `WAITING` y después se cambia la visibilidad, así un mensaje que vuelve antes de tiempo siempre encuentra una fila que se puede reclamar. Cuando el handler devuelve éxito, **el event source mapping borra el mensaje**.
+6. **Cierre condicional.** La ejecución termina en un estado terminal, o pasa a `WAITING` con un motivo: `record`, `unknown`, `provider` o `api`. `record` y `unknown` suman un intento; `api` también, cuando la falla es de un solo registro ([§5](#5-manejo-de-errores)). El orden es fijo: primero se escribe `WAITING` y después se cambia la visibilidad, así un mensaje que vuelve antes de tiempo siempre encuentra una fila que se puede reclamar. Cuando el handler devuelve éxito, **el event source mapping borra el mensaje**.
 
 ---
 
@@ -318,11 +320,11 @@ sequenceDiagram
 
 ## 5. Manejo de errores
 
-La API devuelve un contrato de error: `{ code, retryable, scope: "record" | "provider", origin: "api" | "provider" }`. Es la API la que habla con el proveedor y sabe qué falló, así que el worker solo traduce ese contrato. Una respuesta sin ese cuerpo la generó API Gateway o λ1, no el proveedor. λ1 además informa el origen en el header `x-error-origin`, que tiene prioridad sobre el cuerpo: un proveedor no puede falsificarlo aunque la API le reenvíe su cuerpo de error.
+La API devuelve un contrato de error: `{ code, retryable, scope: "record" | "provider", origin: "api" | "provider" }`. Es la API la que habla con el proveedor y sabe qué falló, así que el worker solo traduce ese contrato. Una respuesta sin ese cuerpo la generó API Gateway o λ1, no el proveedor. λ1 además informa el origen en el header `x-error-origin`, que tiene prioridad sobre el cuerpo: un proveedor no puede falsificarlo aunque la API le reenvíe su cuerpo de error. Si λ1 corta mientras λ2 sigue viva, tiene que responder sin cuerpo (502 o 504) y no con `origin = api`, para que el worker lo trate como resultado desconocido.
 
 **Plan B, si la API no puede exponer `scope`:** mapear por código HTTP.
 
-- Cualquier respuesta sin el cuerpo de error de la API → error de la API.
+- Una respuesta sin el cuerpo de error de la API → error de la API, salvo 502 y 504.
 - 429 y 503 → error del proveedor.
 - 500 → error del registro.
 - 502, 504 y timeouts → resultado desconocido.
@@ -331,8 +333,8 @@ La API devuelve un contrato de error: `{ code, retryable, scope: "record" | "pro
 |---|---|---|---|
 | Éxito | 2xx | `SUCCEEDED` | — |
 | Permanente de dato | 400, 404, 422 con el cuerpo de error de la API (`origin = provider`), endpoint fuera de la allowlist | `FAILED_PERMANENT`; el proveedor sigue | — |
-| Configuración del proveedor | 401, 403 con `origin = provider` | `WAITING` (motivo `provider`): deshabilita el proveedor y dispara una alarma. El registro no se quema | No |
-| Error de la API misma | Respuestas generadas por API Gateway (403 de IAM, 404 de ruta), 5xx sin el cuerpo de error de la API, errores de λ1 | `WAITING` (motivo `api`). Si el breaker de la API está abierto: pausa global y alarma. Si la falla es de un solo registro: se trata como error del registro | No, salvo que la falla sea de un solo registro |
+| Configuración del proveedor | 401, 403 con `origin = provider` | `WAITING` (motivo `provider`): deshabilita el proveedor, con un log de error y la métrica `ProveedoresDeshabilitados`; si sus mensajes esperan más de 1 h, salta la alarma de backlog. El registro no se quema | No |
+| Error de la API misma | Respuestas generadas por API Gateway (403 de IAM, 404 de ruta), 5xx sin el cuerpo de error de la API (salvo 502 y 504), errores de λ1 | `WAITING` (motivo `api`). Si el breaker de la API está abierto: pausa global y alarma. Si la falla es de un solo registro: se trata como error del registro | No, salvo que la falla sea de un solo registro |
 | Del proveedor | 429, 503, 423 (lease ocupado), `scope = provider` | `WAITING` (motivo `provider`): retiene el grupo con el backoff del proveedor | **No.** Un proveedor caído no manda sus registros a la DLQ |
 | Del registro | 500 con `retryable = true` y `scope = record` | `WAITING` (motivo `record`): retiene el grupo con backoff exponencial de 15, 30 y 60 s, con equal jitter (entre la mitad y el total de cada valor) | Sí, hasta 4 |
 | Desconocido | timeout, 502, 504, conexión cortada | `WAITING` (motivo `unknown`). Con lease en λ2 es seguro: recibe 423 mientras λ2 siga viva. Sin lease, primero la cuarentena | Sí |
@@ -344,14 +346,15 @@ La API devuelve un contrato de error: `{ code, retryable, scope: "record" | "pro
 - La retención es `max(Retry-After, backoff)`, con backoff de 5 s a 15 min.
 - Desde la recepción 100 del mismo mensaje, la retención mínima pasa a 120 s.
 - Peor caso en 24 h, aun con un `Retry-After: 5` constante: 100 + 86.400 / 120 = **820 recepciones**. Queda por debajo de `maxReceiveCount = 1.000`, que es el máximo de SQS.
+- La pausa global (API caída) retiene en tramos de 60 s, sin ese mínimo. Si la API estuviera caída más de ~16 h, los mensajes en cabeza de cada grupo pasarían las 1.000 recepciones y caerían a la DLQ ([§8](#8-modos-de-falla)).
 - Cada retención dura como máximo 15 minutos, lejos del tope de 12 h de visibilidad.
 - A las 24 h el mensaje pasa a `SUPERSEDED`.
 
 **Breakers por tasa de errores.**
 
-- **Por proveedor.** Se abre si en la ventana de los últimos 10 a 20 minutos (mínimo 20 llamadas, **contando también los éxitos**) falla más de la mitad y las fallas vienen de al menos 10 registros distintos. Entonces se trata como falla del proveedor: pausa sin consumir intentos y alarma. Unos pocos registros rotos en un proveedor sano no lo abren.
+- **Por proveedor.** Se abre si en la ventana de los últimos 10 a 20 minutos (mínimo 20 llamadas, **contando también los éxitos**) falla más de la mitad y las fallas vienen de al menos 10 registros distintos. Entonces se trata como falla del proveedor: pausa sin consumir intentos (métrica `PausasDeProveedor`). Unos pocos registros rotos en un proveedor sano no lo abren.
 - **Global (de la API).** Una respuesta que no viene del proveedor pausa todo el despacho solo si en la ventana fallaron así al menos 5 registros de al menos 2 proveedores. Un solo registro envenenado (por ejemplo, una ruta inexistente que responde 403) no alcanza: agota sus intentos y va a la cola de agotados.
-- **Permanentes.** También se pausa el despacho si más del 20% de las llamadas de los últimos 10 minutos terminan en `FAILED_PERMANENT`. Un salto así suele venir de un cambio de IAM o un deploy roto, no de datos malos.
+- **Permanentes.** También se pausa el despacho si en la ventana de los últimos 10 a 20 minutos (mínimo 50 llamadas) más del 20% terminan en `FAILED_PERMANENT`. Un salto así suele venir de un cambio de IAM o un deploy roto, no de datos malos.
 
 **Decisiones.**
 
@@ -365,13 +368,12 @@ La API devuelve un contrato de error: `{ code, retryable, scope: "record" | "pro
 - **Cuánto frena un registro defectuoso.**
   - Con errores rápidos, sus 3 esperas suman como máximo 105 s, o sea ~2 min.
   - Con timeouts son 4 llamadas de 30 s más las esperas: ~4 min con lease y ~5 min con cuarentena. Si eso molesta en la práctica, se pasa al reintento diferido (Anexo A).
-- **Redrive desde la cola de agotados.** Lo hace una herramienta propia, porque la fila ya está cerrada y el mensaje solo trae ids. La herramienta reconstruye el trabajo desde el ledger con una nueva generación de intentos (`execId#gen`).
+- **Redrive desde la cola de agotados.** Queda pendiente una herramienta propia, porque la fila ya está cerrada y el mensaje solo trae ids: tiene que reconstruir el trabajo desde el ledger con una nueva generación de intentos, lo que implica extender el formato del `execId`.
 
 ```mermaid
 stateDiagram-v2
   [*] --> ENQUEUED: Dispatcher, si no existe
   [*] --> IN_PROGRESS: claim antes que el ledger
-  [*] --> SUPERSEDED: salteado por el cursor
   ENQUEUED --> IN_PROGRESS: claim
   WAITING --> IN_PROGRESS: claim
   IN_PROGRESS --> IN_PROGRESS: reclaim con lease vencido
@@ -401,7 +403,7 @@ Con exclusión, cada proveedor es una cola de un solo servidor. El grupo FIFO qu
 Este valor se mide; no se supone.
 
 ```
-ρ_p = N_p × L_p / (86.400 × c_p)        N_p registros · L_p tiempo de ocupación p95 · c_p carriles (1 por defecto)
+ρ_p = N_p × L_p / (86.400 × c_p)        N_p registros · L_p tiempo de ocupación promedio · c_p carriles (1 por defecto)
 ```
 
 | Proveedor (ejemplo) | N_p | Latencia | L_p | ρ_p | Estado |
@@ -411,15 +413,17 @@ Este valor se mide; no se supone.
 | C | 30.000 | 1,50 s | 1,70 s | 0,59 | OK |
 | D | 5.000 | 8,00 s | 8,20 s | 0,47 | OK |
 
-- **Umbrales:** hasta 0,7 está OK, entre 0,7 y 1 dispara una alerta y por encima de 1 es inviable.
-- **Medición:** el PoC mide cuántos mensajes por segundo procesa un grupo con batch 1. Después, el Verificador recalcula ρ_p cada día con los tiempos de ocupación reales y alerta antes de que empiece el día.
-- **Techo real:** `Σ c_p / L_p`. No depende de la infraestructura.
+- **Umbrales:** hasta 0,7 está OK; entre 0,7 y 1 queda marcado en la métrica `Utilizacion` y en el log; por encima de 1 es inviable y dispara una alarma.
+- **Medición:** el PoC mide cuántos mensajes por segundo procesa un grupo con batch 1. Después, el Verificador recalcula ρ_p cada noche con los tiempos de ocupación reales, antes de que empiece el día.
+- **Techo real:** `Σ c_p / L_p`. No depende de la infraestructura sino de **cuántos proveedores hay** y de sus carriles. Con L_p ≈ 1 s, cada proveedor atiende como máximo ~86.000 consultas por día. Con los 50 proveedores que supone el Anexo E, el techo es ~4,3M por día.
 
 | Registros/día | req/s promedio | En vuelo (ciclo de 1 s) | Qué cambia |
 |---|---|---|---|
 | 1M | 11,6 | ~12 | Nada |
-| 10M | 116 | ~116 | FIFO high-throughput y worker en Lambda Managed Instances o Fargate |
-| 100M | 1.157 | ~1.157 | Varias colas FIFO por grupos de proveedores, fan-out del Dispatcher, DynamoDB provisionado con 7 días de retención e historial en S3. El índice ocupa ~5 GB |
+| 10M | 116 | ~116 | La infraestructura entra sin cambios (116 TPS está por debajo de los 300 por acción de FIFO). El límite son los proveedores: con 50, cada uno tendría ~200.000 registros (ρ ≈ 2,3), así que hacen falta más proveedores o carriles c_p > 1. Las consultas de conteo del Verificador, que recorren la tabla, se miden y pasan a incrementales si hace falta |
+| 100M | 1.157 | ~1.157 | FIFO high-throughput o varias colas por grupos de proveedores, fan-out del Dispatcher, aumento de la cuota de concurrencia de Lambda (~3.500 entre worker, λ1 y λ2), DynamoDB provisionado con 7 días de retención e historial en S3, y carriles c_p > 1 en casi todos los proveedores. El índice ocupa ~5 GB |
+
+**Si un proveedor no entra en el día (ρ > 1).** Su cursor se atrasa hasta 24 h y, desde ahí, en cada tick se saltea el resto del minuto vencido. Como el orden dentro de cada minuto es fijo, tienden a saltearse siempre los mismos registros, y la cobertura queda en ~1/ρ. La alarma salta la noche anterior. La política es darle carriles c_p > 1 (Anexo A) o, si el proveedor no los acepta, pasar a un ciclo de ⌈ρ⌉ días rotando el orden.
 
 **Protección de la API.** La API comparte con nosotros la concurrencia regional de Lambda (1.000 por defecto). `MaximumConcurrency` limita al worker y se configura reserved concurrency en λ1 y λ2.
 
@@ -427,15 +431,17 @@ Este valor se mide; no se supone.
 
 ## 7. Trazabilidad: requisito → mecanismo → test → métrica
 
+**Hoy** es lo que ya existe en este repo; **previsto** es lo que se agrega en el proyecto ([§9](#9-ciclo-de-vida-de-desarrollo)).
+
 | Requisito | Mecanismo | Test que lo prueba | Métrica y alarma en producción |
 |---|---|---|---|
-| Consulta diaria | Slot por hash, cursor por proveedor, `execId` por (registro, día), fila `SUPERSEDED` para lo salteado | Property-based: cada registro aparece exactamente una vez por día, incluido el cambio de día | Cobertura ≥ 99,9% de registros con estado final en su día |
-| Distribuida en el día | Slot uniforme por proveedor y admisión con cota global | Prueba χ² de uniformidad por proveedor sobre 1M de registros sintéticos | Desvío p99 respecto del turno (AgeOfFirstAttempt) < 15 min |
-| Persistir el resultado | Orden "enviar → ledger condicional → cursor", claim que crea la fila si falta, cierre condicional | Integración: caídas en cada punto del Dispatcher y después del claim, sin duplicados ni filas perdidas | Ejecuciones abiertas hace más de 1 h = 0 |
-| Errores reintentables y no | Taxonomía con `scope` y `origin`, `WAITING` con motivo, breakers por tasa, cola de agotados | Contrato (OpenAPI y Pact) y suite de fallas inyectadas, incluido `Retry-After: 5` durante 24 h | Agotados sin triage por más de 24 h = 0; errores por clase |
-| Sin concurrencia por proveedor | FIFO, lease en λ2, una sola capa de reintentos y admisión | PoC de semántica FIFO y **detector de concurrencia** en la prueba de carga y en FIS | **Solapamientos = 0** sobre las llamadas registradas por λ2 |
+| Consulta diaria | Slot por hash, cursor por proveedor, `execId` por (registro, día), contador de salteados | **Hoy:** cursor y cambio de día (`tests/domain/cursor.test.ts`), Dispatcher con fakes y la simulación de un día completo. **Previsto:** property-based, cada registro exactamente una vez por día | **Hoy:** métricas `Salteados` y `Superadas` por proveedor. **Previsto:** cobertura ≥ 99,9% de registros con estado final en su día |
+| Distribuida en el día | Slot uniforme por proveedor y admisión con cota global | **Hoy:** χ² de uniformidad por hora sobre 48.000 ids (`tests/domain/time-and-job.test.ts`). **Previsto:** por proveedor sobre 1M | **Hoy:** alarma de backlog (mensajes esperando más de 1 h). **Previsto:** desvío p99 respecto del turno < 15 min |
+| Persistir el resultado | Orden "enviar → ledger condicional → cursor", claim que crea la fila si falta, cierre condicional | **Hoy:** integración contra DynamoDB Local (claim, fencing y cursor) y el Dispatcher con fakes. **Previsto:** caídas inyectadas en cada punto | **Hoy:** barrido horario de lo abierto hace más de 25 h. **Previsto:** abiertas hace más de 1 h = 0 |
+| Errores reintentables y no | Taxonomía con `scope` y `origin`, `WAITING` con motivo, breakers por tasa, cola de agotados | **Hoy:** clasificador y Worker (`tests/domain/classify.test.ts`, `tests/handlers/worker.test.ts`) y la simulación con un proveedor inestable y un registro envenenado. **Previsto:** contrato con OpenAPI y Pact | **Hoy:** alarmas de agotados, DLQ y fallas de la API |
+| Sin concurrencia por proveedor | FIFO, lease en λ2, una sola capa de reintentos y admisión | **Hoy:** retención FIFO contra ElasticMQ y **detector de concurrencia** en la simulación (0 solapamientos). **Previsto:** PoC en AWS y caos con FIS | **Solapamientos = 0** sobre las llamadas registradas por λ2 (Verificador y alarma) |
 
-**Detector de concurrencia.** Es una API mock que hace un incremento condicional de requests en vuelo por proveedor. El test falla si alguna vez ve 2.
+**Detector de concurrencia.** Es la API mock de `local/mock-api.ts`: cuenta los requests en vuelo por proveedor, y la simulación falla si alguna vez ve 2. En producción, el mismo control lo hace el SLI sobre las llamadas que registra λ2.
 
 ---
 
@@ -448,9 +454,10 @@ Este valor se mide; no se supone.
 | El worker cae después del claim | `IN_PROGRESS` colgada | `lease_until` vencido | El mensaje vuelve tras la visibilidad y se reclama con la misma key |
 | Timeout con λ2 todavía viva | Riesgo de una segunda llamada | Resultado desconocido | 423 del lease (o cuarentena) hasta que λ2 termina |
 | λ2 muere por timeout | Lease sin liberar, llamada sin fin registrado | — | El lease vence solo; el SLI imputa `inicio + T_λ2` como fin |
-| Proveedor con `Retry-After: 5` durante 24 h | Retenciones constantes | Alarma de proveedor en pausa | Mínimo de 120 s desde la recepción 100 (≤ 820 recepciones); a las 24 h, `SUPERSEDED` |
-| Proveedor deshabilitado (401/403) | No se lo llama | Alarma | Se deja de admitir; lo que estaba en cola se retiene en tramos de 15 min hasta reactivarlo o hasta las 24 h |
+| Proveedor con `Retry-After: 5` durante 24 h | Retenciones constantes | Métrica `PausasDeProveedor` y alarma de backlog | Mínimo de 120 s desde la recepción 100 (≤ 820 recepciones); a las 24 h, `SUPERSEDED` |
+| Proveedor deshabilitado (401/403) | No se lo llama | Log de error, métrica `ProveedoresDeshabilitados` y alarma de backlog | Se deja de admitir; lo que estaba en cola se retiene en tramos de 15 min hasta reactivarlo o hasta las 24 h |
 | La API devuelve 500 en todo | Registros que se queman hacia agotados | Breaker global | Pausa del despacho y alarma |
+| La API caída más de ~16 h | Los mensajes en cabeza de cada grupo pasan las 1.000 recepciones | Alarmas de fallas de la API y de la DLQ | Pasan a la DLQ de seguridad; el barrido de 25 h libera su lugar y al día siguiente esos registros vuelven a tocar |
 | Un cambio de IAM hace que API Gateway responda 403 | — | Respuesta sin el cuerpo de la API (`origin = api`) | `WAITING` con motivo `api` y pausa global; ningún registro se quema |
 | Registro defectuoso | Su proveedor frenado de ~2 a ~5 min | Intentos agotados | Cola de agotados y alarma |
 | Mensaje en la DLQ de seguridad | Fila abierta que ocupa admisión | Barrido horario de más de 25 h | `SUPERSEDED`; triage de la DLQ |
@@ -462,24 +469,28 @@ Este valor se mide; no se supone.
 
 ## 9. Ciclo de vida de desarrollo
 
+Lo marcado **(ya en este repo)** existe hoy en el prototipo; el resto se agrega al pasar a un proyecto con equipo.
+
 1. **Diseño.**
-   - ADRs en `docs/adr/` y diagramas Mermaid versionados junto al código.
+   - Decisiones como ADRs y diagramas versionados junto al código **(ya en este repo:** [Anexo C](#anexo-c--decisiones-adrs) y `docs/diagramas/`**)**. En el proyecto, un archivo por ADR.
    - Definición de terminado: código, tests, ADR, alarma y entrada en el runbook.
 2. **Código.**
-   - Monorepo: `infra/` (AWS CDK), `dispatcher/`, `worker/`, `verifier/` y `libs/` (clasificador, backoff, claim).
+   - Un solo repo **(ya en este repo)**: `src/` en capas (dominio puro, puertos, adaptadores, handlers y entrypoints), `infra/` (AWS CDK), `sql/`, `tests/` y `local/`.
    - Trunk-based, PRs chicos, 1 review y CODEOWNERS en infraestructura.
 3. **Contratos versionados.**
-   - El mensaje lleva `schemaVersion`. Los cambios son compatibles hacia atrás y los consumidores se despliegan antes que los productores.
+   - El mensaje lleva `schemaVersion` y se valida al recibirlo; lo que no pasa va a la cola de agotados **(ya en este repo)**. Los cambios son compatibles hacia atrás y los consumidores se despliegan antes que los productores.
    - El contrato con la API se versiona en OpenAPI con semver, y Pact verifica los dos lados en CI.
-4. **CI.** Estos gates bloquean el merge:
-   - lint, typecheck y tests unitarios;
-   - SAST, análisis de dependencias y detección de secretos (gitleaks);
-   - `cdk synth` con cdk-nag, y `cdk diff` comentado en el PR.
+4. **CI.** Estos gates bloquean el merge **(ya en este repo:** `.github/workflows/ci.yml`**)**:
+   - typecheck y tests unitarios;
+   - auditoría de dependencias, firmas de npm y detección de secretos con gitleaks sobre todo el historial;
+   - `cdk synth` con cdk-nag (un hallazgo sin justificar rompe el build) y SBOM;
+   - integración contra emuladores y la simulación de punta a punta.
+   - En el proyecto se suman lint, SAST y `cdk diff` comentado en el PR.
 5. **Tests.**
-   - **Unitarios.** Clasificador, backoff, breakers y asignación de slots (property-based, incluido el cambio de día).
-   - **Integración, en un stack efímero por PR.** Retención FIFO, claim que crea la fila, caídas del Dispatcher, cola de agotados.
-   - **Carga en staging.** 1M y 10M de registros sintéticos contra una API mock con latencia y errores por proveedor, con el detector de concurrencia activo.
-   - **Caos con AWS FIS.** Matar workers a mitad de un request, 30% de respuestas 5xx y un proveedor caído 2 h. El criterio es que se cumplan los SLOs y haya 0 solapamientos.
+   - **Unitarios (ya en este repo, 125).** Clasificador, backoff, breakers, slots, cursor y cambio de día; Dispatcher y Worker con fakes en memoria; infraestructura con cdk-nag.
+   - **Integración (ya en este repo, 12).** Contra Postgres, DynamoDB Local y ElasticMQ: índice y query, claim con fencing y retención FIFO.
+   - **Simulación de punta a punta (ya en este repo).** Un día completo con los handlers reales, un proveedor inestable, un registro envenenado y el detector de concurrencia.
+   - **En el proyecto:** property-based del cursor, integración en un stack efímero por PR, carga con 1M y 10M en staging, y caos con AWS FIS (matar workers a mitad de un request, 30% de respuestas 5xx y un proveedor caído 2 h). El criterio es que se cumplan los SLOs y haya 0 solapamientos.
 6. **Entornos.**
    - dev (un stack por desarrollador), staging (igual a prod, con datos sintéticos) y prod.
    - Lo ideal son cuentas separadas. Si tiene que ser la misma cuenta, se aíslan con prefijos, permission boundaries y claves KMS distintas.
@@ -505,7 +516,7 @@ Este valor se mide; no se supone.
 
 | Semana | Fase | Entregables | Responsable | Esfuerzo | Criterio de salida |
 |---|---|---|---|---|---|
-| 1 | Discovery y PoC | N_p y tiempo de ciclo por proveedor; contrato con la API; **PoC de exclusión**: retención FIFO, recepciones de los mensajes que esperan detrás de uno retenido, tiempo de ocupación por grupo y detector de concurrencia | Backend A y B; equipo de la API | 10 + 1 (API) d-p | PoC en verde, ρ_p calculado, ADRs acordadas |
+| 1 | Discovery y PoC | N_p y tiempo de ocupación por proveedor; contrato con la API; **PoC de exclusión**: retención FIFO, recepciones de los mensajes que esperan detrás de uno retenido, tiempo de ocupación por grupo y detector de concurrencia | Backend A y B; equipo de la API | 10 + 1 (API) d-p | PoC en verde, ρ_p calculado, ADRs acordadas |
 | 2 | Esqueleto funcional | CDK, CI/CD y entornos; índice en staging; Dispatcher → FIFO → Worker → DynamoDB contra un mock | Backend A y B | 10 d-p | E2E automático en dev |
 | 3 | Núcleo correcto | Cursor, admisión y cota global; ledger; claim con lease; taxonomía, breakers, colas de agotados y de seguridad; allowlist | Backend A y B; equipo de la API (contrato de errores) | 10 + 3 (API) d-p | Suite de fallas en verde |
 | 4 | **MVP** | Lease, registro de llamadas e idempotencia en λ2; Verificador; dashboards y alarmas; carga con 1M | Backend A y B; equipo de la API | 10 + 6 (API) d-p | 0 solapamientos con 1M; SLOs 3 días seguidos en staging |
@@ -514,6 +525,8 @@ Este valor se mide; no se supone.
 | 7 | Colchón | 1 semana (~15%) | — | — | — |
 
 **Total:** 52 días-persona de backend, 10 del equipo de la API y 4 de SRE.
+
+**Punto de partida.** El prototipo de este repo adelanta buena parte de las semanas 2 y 3 (Dispatcher, FIFO, Worker, ledger, admisión, taxonomía, breakers, allowlist, CDK y CI) y ya trae la cuarentena del Plan B. El plan no se acorta porque lo que falta es justamente lo que el prototipo no puede resolver solo: el PoC en una cuenta real, el contrato con el equipo de la API y la carga con datos reales. Sí baja el riesgo de las semanas 2 y 3.
 
 **Plan B.** Si el equipo de la API no entrega el lease en la semana 4, el MVP sale con la cuarentena, que ya está implementada, y el lease pasa a la etapa siguiente.
 
@@ -563,9 +576,9 @@ Cada evolución se activa por una señal medida, no por adelantado.
 | Un body de hasta 24 h no es aceptable | El worker **relee el registro** antes del primer intento y fija esa versión para los reintentos |
 | Un proveedor acepta `c > 1` | **Carriles** `proveedor#epoch#k`. Cuando cambia `c` se incrementa el epoch, y el epoch nuevo no se admite hasta vaciar el anterior |
 | Las altas deben correr al instante | **Outbox + CDC** hacia un espejo en DynamoDB; el alta encola su primera corrida |
-| Hace falta historial o analítica | Kinesis Data Streams for DynamoDB → Firehose → S3 (Parquet) → Athena |
+| Hace falta historial o analítica | El worker manda los resultados terminales a Firehose → S3 (Parquet) → Athena |
 | Más de 10M/día, o Lambda supera ~USD 500/mes | **Lambda Managed Instances** (soporta el event source mapping de SQS; falta validar FIFO) o consumidores asíncronos en Fargate |
-| ~100M/día | Varias FIFO por grupos de proveedores, capacidad provisionada y reservada, 7 días en DynamoDB e historial en S3, logs de éxito muestreados |
+| ~100M/día | Varias FIFO por grupos de proveedores, aumento de la cuota de concurrencia de Lambda, capacidad provisionada y reservada, 7 días en DynamoDB e historial en S3, logs de éxito muestreados |
 
 ## Anexo B · Alternativas evaluadas
 
@@ -574,7 +587,7 @@ Cada evolución se activa por una señal medida, no por adelantado.
 | **SQS FIFO, un grupo por proveedor** | El servicio, con aislamiento por grupo | Sí, sumando la capa 2 | Nula | **Elegida** |
 | **Lease en λ2** | DynamoDB, en el recurso | **Sí** | Baja | **Adoptada como capa 2** |
 | Lambda durable functions (GA dic-2025), un actor por proveedor | Invariante propio: una ejecución por nombre | No | Baja | Prometedora pero muy nueva: tiene límites de operaciones por ejecución y sus pasos son at-least-once. A revisar más adelante |
-| Step Functions con Distributed Map | No hay exclusión por clave; las ventanas se pisan | No | Media | Descartada como núcleo; sirve para el planner del Anexo A |
+| Step Functions, una ejecución Standard por proveedor y día con un Map secuencial | El nombre de la ejecución, único por proveedor y día | No: el timeout de una tarea no corta a λ2 | Media | Descartada como núcleo: ~USD 25 por millón de transiciones (unos USD 3.000/mes a 1M/día) y el límite de 25.000 eventos de historial obliga a ejecuciones hijas. Sirve para el planner del Anexo A |
 | EventBridge Scheduler por registro | Ninguna | No | Alta: más de 1M de schedules que sincronizar | Descartada; los schedules de un solo uso sirven para reintentos |
 | DynamoDB como scheduler + semáforo | Lease propio | No | Media | Descartada: contención y espera activa |
 | Carriles con lease en Fargate | Lease propio | No | Alta | Descartada: riesgo de split-brain en los deploys |
@@ -611,7 +624,7 @@ Cada evolución se activa por una señal medida, no por adelantado.
 |---|---|---|---|
 | 01 | Exclusión con SQS FIFO por proveedor | Anexo B | La ventana de 120.000 mensajes obliga a la ADR-03 |
 | 02 | Slot calculado con `md5(id)` en un índice, creado en el writer con `CONCURRENTLY` | Columna `slot` con backfill; planner diario; `hashtextextended`, que no es estable entre versiones | El ritmo es estadístico, no exacto (el planner queda en el Anexo A). ~50 MB de índice por millón de filas |
-| 03 | Admisión con cursor por proveedor y cota global | Encolar todo; tabla de diferidos | Lo que vence a las 24 h se saltea (`SUPERSEDED`) |
+| 03 | Admisión con cursor por proveedor y cota global | Encolar todo; tabla de diferidos | Lo que vence a las 24 h se saltea y se cuenta |
 | 04 | Lease y registro de llamadas en λ2, solo para el batch salvo que el dueño de la API decida otra cosa. Cuarentena como alternativa | Solo cuarentena | Depende del equipo de la API: 4 escrituras por llamada |
 | 05 | Una sola capa de reintentos: el worker | Reintentos del SDK en cada salto | Configuración explícita en λ1 |
 | 06 | Orden "enviar → ledger condicional → cursor", sin contadores | Contador de pendientes; estado intermedio con barrido | Un mensaje puede llegar antes que su fila: el claim la crea |
@@ -626,12 +639,15 @@ Cada evolución se activa por una señal medida, no por adelantado.
 
 | PK | SK | Contenido |
 |---|---|---|
-| `PROV#<proveedor>` | `STATE` | Cursor `(fecha, slot, id)`, `enabled`, `c`, `cap`, `T_prov`, allowlist, backoff y ventana de errores del proveedor |
-| `REC#<id>` | `RUN#<fecha>` | `status`, `waiting_reason`, `attempt`, `gen`, `lease_until`, `turno`, `started_at`, `ended_at`, código HTTP, clase de error, respuesta (hasta 8 KB) o puntero a S3, TTL (90 días a 1M/día, 7 a 100M/día), `open_provider` (solo mientras no es terminal) |
+| `PROV#<proveedor>` | `STATE` | Cursor `(fecha, slot, id)`, `enabled`, allowlist, pausa y nivel de backoff del proveedor |
+| `REC#<id>` | `RUN#<fecha>` | `status`, `waitingReason`, `attempt`, `leaseUntil`, `claimToken`, `turno`, `startedAt`, `endedAt`, código HTTP, clase de error, respuesta (hasta 8 KB) o puntero a S3, TTL (90 días a 1M/día, 7 a 100M/día), `openProvider` (solo mientras no es terminal) |
+| `PROV#<proveedor>` o `GLOBAL` | `STATS#<ventana>`, `DAY#<fecha>`, `SKIPPED#<fecha>` | Ventanas de errores para los breakers, tiempo ocupado del día para ρ y contador de salteados. `GLOBAL/STATE` guarda la pausa global |
+
+El detalle exacto está en `src/adapters/dynamo.ts`.
 
 **GSI disperso `open`.**
 
-- Clave de partición `open_provider`, clave de ordenamiento `turno`, con proyección `INCLUDE status`.
+- Clave de partición `openProvider`, clave de ordenamiento `turno`, con proyección `INCLUDE status`.
 - Sirve para tres cosas:
   - contar las ejecuciones abiertas de cada proveedor para la admisión (`Select COUNT`);
   - encontrar las de más de 25 h para el barrido horario;
@@ -641,8 +657,10 @@ Cada evolución se activa por una señal medida, no por adelantado.
 
 | PK | SK | Contenido |
 |---|---|---|
-| `PROV#<proveedor>` | `LEASE` | `holder`, `token`, `lease_until` |
-| `PROV#<proveedor>` | `CALL#<inicio>#<token>` | `inicio`, `fin` (si llegó a registrarse), resultado; TTL de 7 días |
+| `PROV#<proveedor>` | `LEASE` | `holder`, `leaseUntil` |
+| `PROV#<proveedor>` | `CALL#<inicio>#<holder>` | `start`, `end` (si llegó a registrarse), resultado; TTL de 7 días |
+
+Implementación de referencia para el equipo de la API: `src/api-lease/provider-lease.ts`.
 
 **Último resultado de un registro:** `Query REC#<id>` con `ScanIndexForward = false` y `Limit 1`.
 
@@ -654,24 +672,24 @@ Cada evolución se activa por una señal medida, no por adelantado.
 |---|---|---|
 | Worker Lambda | 256 MB, ~1 s por consulta | ~130 |
 | SQS FIFO | ~2,2 requests por mensaje | ~35 |
-| DynamoDB on-demand | ~11 WRU por consulta (ledger, claim, cierre, GSI, lease y registro de llamada), más 90 días de storage (~180 GB) | ~250 |
+| DynamoDB on-demand | ~14 WRU por consulta (ledger, claim, cierre, GSI, telemetría de los breakers, lease y registro de llamada), más 90 días de storage (~180 GB) | ~310 |
 | CloudWatch | 300 métricas (50 proveedores × 6, a USD 0,30), ~30 GB de logs, alarmas | ~115 |
 | VPC endpoints | Interfaz: SQS y execute-api en 2 AZ. Gateway: DynamoDB y S3, sin costo | ~30 |
 | Resto | Scheduler, Dispatcher, Verificador, KMS, S3 | ~20 |
-| **Total** | | **~580 (≈ USD 19 por millón)** |
+| **Total** | | **~640 (≈ USD 21 por millón)** |
 
 **100M/día** (3.000M consultas/mes). Supuestos: 7 días en DynamoDB, historial en S3 y logs de éxito muestreados.
 
 | Rubro | USD/mes |
 |---|---|
 | SQS | ~3.300 |
-| DynamoDB provisionado con capacidad reservada, ~9 WRU por consulta (el registro de llamadas pasa a logs) | ~3.300 |
+| DynamoDB provisionado con capacidad reservada, ~12 WRU por consulta (el registro de llamadas pasa a logs) | ~4.400 |
 | DynamoDB storage, ~1 TB | ~250 |
-| Historial: Kinesis, Firehose y S3 | ~500 |
+| Historial: Firehose desde el worker y S3 | ~500 |
 | Cómputo: Managed Instances o Fargate | ~500 |
 | Observabilidad | ~500 |
 | Red: procesamiento de datos de los endpoints | ~300 |
-| **Total** | **~8.650 (≈ USD 2,9 por millón)** |
+| **Total** | **~9.750 (≈ USD 3,3 por millón)** |
 
 **Alcance.** Son los costos que agrega esta solución, incluidas las escrituras del lease en λ2.
 
@@ -679,9 +697,10 @@ Cada evolución se activa por una señal medida, no por adelantado.
 
 - el reader, que ya existe;
 - el cómputo de λ1 y λ2;
+- los requests a API Gateway de la API interna (~USD 105/mes a 1M/día, a precio de lista de REST);
 - el almacén de idempotencia de la API (~USD 150–300/mes más, en el presupuesto de su equipo).
 
-El costo no decide la arquitectura: Step Functions con hijos Express sería barato, y se descarta porque no ofrece exclusión por clave.
+El costo no decide la arquitectura por sí solo, pero sí descarta a Step Functions como núcleo: la exclusión por proveedor con ejecuciones Standard costaría unos USD 3.000/mes a 1M/día (Anexo B).
 
 ## Anexo F · Seguridad (STRIDE)
 
@@ -697,44 +716,17 @@ El costo no decide la arquitectura: Step Functions con hijos Express sería bara
 
 ## Anexo G · Código de referencia
 
-```ts
-export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
-  const msg = event.Records[0];                                    // batch = 1
-  const job: Job = JSON.parse(msg.body);                           // execId, proveedor, endpoint, body, turno
-  if (olderThan24h(job)) return supersede(job);                    // ya vence su turno siguiente
-  const prov = await getProviderState(job.proveedor);
-  if (prov.pausedFor() > 0) return hold(msg, Math.min(prov.pausedFor(), 900)); // sin estado ni intento
+El prototipo completo está en este repo. Para leerlo, conviene arrancar por estos archivos:
 
-  const run = await claim(job);     // crea la fila si falta; ENQUEUED | WAITING | IN_PROGRESS con lease vencido
-  if (run.status === 'TERMINAL') return ack();                     // duplicado
-  if (run.status === 'BUSY') return hold(msg, run.leaseLeft);      // IN_PROGRESS vigente: no se descarta
-  if (!prov.allows(job.endpoint)) return finish(job, permanent('ENDPOINT_NOT_ALLOWED'));
-
-  const outcome = classify(await callApi(job, { idempotencyKey: job.execId, timeoutMs: 30_000, retries: 0 }));
-  if (outcome.origin === 'api') return wait(job, msg, 'api', API_PAUSE_S);  // falla la API, no el registro
-  if (outcome.ok || outcome.permanent) return finish(job, outcome);         // alimenta los breakers
-
-  const reason = prov.breakerOpen() ? 'provider' : outcome.scope;  // tasa sobre 50 llamadas, ≥ 10 registros
-  if (reason === 'provider') {                                     // no consume intento del registro
-    return wait(job, msg, 'provider', providerHold(outcome.retryAfter, msg.attributes.ApproximateReceiveCount));
-  }
-  if (run.attempt + 1 >= MAX_ATTEMPTS) return exhaust(job, outcome);       // cierra y envía ids a agotados
-  const min = reason === 'unknown' && !LEASE_IN_API ? quarantineLeft(job) : 0;
-  return wait(job, msg, reason, Math.max(min, backoff(run.attempt, 15, 60))); // intento + 1
-};
-
-// max(Retry-After, backoff de 5 s a 15 min); desde la recepción 100, mínimo 120 s
-const providerHold = (retryAfter: number | undefined, receives: string) => { /* … */ };
-
-// Primero WAITING, después ChangeMessageVisibility, y batchItemFailures sin throw:
-// el grupo del proveedor queda bloqueado hasta que vence la visibilidad.
-async function wait(job: Job, msg: SQSRecord, reason: Reason, seconds: number) { /* … */ }
-
-const backoff = (n: number, base: number, cap: number) => {      // equal jitter
-  const d = Math.min(cap, base * 2 ** n);
-  return d / 2 + Math.random() * (d / 2);
-};
-```
+| Archivo | Qué tiene |
+|---|---|
+| `src/handlers/worker.ts` | El Worker, en el orden de la [§3.2](#32--worker-por-mensaje): turno vencido, pausas, claim, allowlist, llamada, cierre, retenciones y cuarentena |
+| `src/handlers/dispatcher.ts` | El tick del Dispatcher: cursores, admisión, envío, ledger, cursor y barrido horario |
+| `src/domain/classify.ts` | La taxonomía de errores de la [§5](#5-manejo-de-errores), con el Plan B por código HTTP |
+| `src/domain/cursor.ts` | El cursor por proveedor y el cambio de día |
+| `src/domain/admission.ts`, `breaker.ts` y `backoff.ts` | Admisión, breakers y backoff con equal jitter |
+| `src/api-lease/provider-lease.ts` | El lease por proveedor y el registro de llamadas, como referencia para el equipo de la API |
+| `infra/lib/consultas-stack.ts` | Toda la infraestructura en CDK: colas, tabla, Lambdas, IAM, KMS y alarmas |
 
 **Verificador diario del SLI de solapamiento.** Trabaja con una ventana de 48 h, para no perder solapamientos que crucen la medianoche:
 
