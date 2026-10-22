@@ -70,9 +70,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      # Binario oficial fijado y verificado por checksum. La action escanea solo el rango del push,
+      # y en el primer push de una rama ese rango no existe: escaneaba 0 bytes y fallaba.
+      - name: Escaneo de secretos (gitleaks 8.24.3)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: 8.24.3
+          SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+        run: |
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --verbose --exit-code 1 .
 
   # El deploy usa OIDC hacia un rol de AWS (sin access keys) y corre por entorno con aprobación:
   # dev automático, staging y prod con environment protection rules. Se agrega cuando exista la cuenta.
