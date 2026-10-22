@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Mínimo privilegio para el token del workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: typecheck, tests, auditoría y synth (cdk-nag)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Actions fijadas por SHA (supply chain).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # Falla si el lockfile no coincide con package.json; sin scripts de instalación.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - name: Auditoría bloqueante (runtime ≥ high, todo ≥ critical)
+        run: |
+          npm run audit:runtime
+          npm run audit:all
+      - run: npm audit signatures
+      - name: Synth con cdk-nag (un hallazgo sin justificar rompe el build)
+        run: npx cdk synth --quiet
+      - name: SBOM
+        run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  integracion:
+    name: integración contra emuladores y simulación de punta a punta
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Emuladores (Postgres, DynamoDB Local, ElasticMQ)
+        run: docker compose -f local/docker-compose.yml up -d --wait
+      - run: bash local/generar-cert.sh
+      - run: npm run local:setup
+      - run: npm run test:integration
+      - name: Simulación (falla si se viola alguna garantía, por ejemplo dos llamadas simultáneas a un proveedor)
+        run: npm run local:simular
+
+  secretos:
+    name: gitleaks sobre todo el historial
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # El deploy usa OIDC hacia un rol de AWS (sin access keys) y corre por entorno con aprobación:
+  # dev automático, staging y prod con environment protection rules. Se agrega cuando exista la cuenta.
