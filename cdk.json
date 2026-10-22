@@ -1,0 +1,33 @@
+{
+  "app": "npx tsx infra/bin/app.ts",
+  "watch": {
+    "include": ["infra/**", "src/**"],
+    "exclude": ["node_modules", "cdk.out", "tests"]
+  },
+  "context": {
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "stage": "dev",
+    "vpcId": "vpc-0123456789abcdef0",
+    "vpcCidr": "10.0.0.0/16",
+    "availabilityZones": ["us-east-1a", "us-east-1b"],
+    "privateSubnetIds": ["subnet-0123456789abcdef1", "subnet-0123456789abcdef2"],
+    "endpointsSecurityGroupId": "",
+    "gatewayPrefixListIds": [],
+    "dbSecurityGroupId": "sg-0123456789abcdef0",
+    "manageDbIngress": false,
+    "dbHost": "registros.cluster-ro-example.us-east-1.rds.amazonaws.com",
+    "dbPort": 5432,
+    "dbName": "registros",
+    "dbUser": "consultas_diarias",
+    "dbResourceId": "cluster-EXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+    "apiId": "abcdef1234",
+    "apiStage": "prod",
+    "apiPathPrefixes": ["consultas"],
+    "leasesTableName": "",
+    "leaseInApi": false,
+    "workerMaxConcurrency": 20,
+    "operatorRoleArns": [],
+    "alarmEmail": ""
+  }
+}
